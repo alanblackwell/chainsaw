@@ -9,8 +9,8 @@
     body { background: #000; overflow: hidden; }
     canvas { display: block; }
     #hint {
-      position: fixed; bottom: 36px; width: 100%;
-      text-align: center; color: rgba(200,200,200,0.18);
+      position: fixed; bottom: 40px; width: 100%;
+      text-align: center; color: rgba(255,255,255,0.2);
       font-family: sans-serif; font-size: 13px; letter-spacing: 0.14em;
       pointer-events: none; transition: opacity 2s ease;
     }
@@ -20,61 +20,72 @@
   <canvas id="c"></canvas>
   <div id="hint">drag to cut</div>
   <script>
-  (() => {
     const canvas = document.getElementById('c');
     const ctx    = canvas.getContext('2d');
     const hint   = document.getElementById('hint');
 
-    // Offscreen canvas: image with wounds erased
+    // Offscreen canvas: photo with wound areas erased
     const imgCvs = document.createElement('canvas');
     const imgCtx = imgCvs.getContext('2d');
 
+    // Declare all shared variables upfront (no TDZ hazards)
     let W, H;
-    const resize = () => {
-      W = canvas.width = imgCvs.width  = window.innerWidth;
+    let imgScale = 0, imgW, imgH, imgX, imgY;
+    let activeCut = null;
+    let hintGone  = false;
+    let t = 0;
+
+    function resize() {
+      W = canvas.width  = imgCvs.width  = window.innerWidth;
       H = canvas.height = imgCvs.height = window.innerHeight;
-      imgScale = 0; // recalculate on next draw
-    };
+      imgScale = 0;
+    }
     resize();
     window.addEventListener('resize', resize);
 
+    // Photo
     const img = new Image();
     img.src = 'source.png';
-    let imgScale = 0, imgW, imgH, imgX, imgY;
 
-    // ── Seething dark-red background ──────────────────────────────────────
-    const blobs = Array.from({ length: 9 }, () => ({
-      x:     Math.random(),
-      y:     Math.random(),
-      vx:    (Math.random() - 0.5) * 0.0007,
-      vy:    (Math.random() - 0.5) * 0.0007,
-      r:     0.11 + Math.random() * 0.24,
-      phase: Math.random() * Math.PI * 2,
-      freq:  0.010 + Math.random() * 0.016,
-    }));
+    // ── Seething background ───────────────────────────────────────────────
+    const blobs = [];
+    for (let i = 0; i < 9; i++) {
+      blobs.push({
+        x:     Math.random() * window.innerWidth,
+        y:     Math.random() * window.innerHeight,
+        vx:    (Math.random() - 0.5) * 0.5,
+        vy:    (Math.random() - 0.5) * 0.5,
+        r:     0,   // set below after W/H known
+        phase: Math.random() * Math.PI * 2,
+        freq:  0.015 + Math.random() * 0.02,
+      });
+    }
+    // Set radii now that W/H are known
+    blobs.forEach(b => { b.r = (0.12 + Math.random() * 0.22) * Math.min(W, H); });
 
     function drawSeething() {
-      ctx.fillStyle = '#040000';
+      ctx.fillStyle = '#080000';
       ctx.fillRect(0, 0, W, H);
-      const dim = Math.min(W, H);
       for (const b of blobs) {
-        b.x = ((b.x + b.vx) + 1) % 1;
-        b.y = ((b.y + b.vy) + 1) % 1;
+        b.x += b.vx;
+        b.y += b.vy;
         b.phase += b.freq;
-        const p  = 0.4 + 0.6 * Math.abs(Math.sin(b.phase));
-        const bx = b.x * W, by = b.y * H, br = b.r * dim;
-        const g  = ctx.createRadialGradient(bx, by, 0, bx, by, br);
-        g.addColorStop(0,    `rgba(${(90 + 90*p)|0},0,0,${0.6*p})`);
-        g.addColorStop(0.35, `rgba(${(40 + 30*p)|0},0,0,${0.35*p})`);
-        g.addColorStop(0.7,  `rgba(12,0,0,${0.2*p})`);
+        if (b.x < -b.r) b.vx =  Math.abs(b.vx);
+        if (b.x > W+b.r) b.vx = -Math.abs(b.vx);
+        if (b.y < -b.r) b.vy =  Math.abs(b.vy);
+        if (b.y > H+b.r) b.vy = -Math.abs(b.vy);
+        const p = 0.35 + 0.65 * Math.abs(Math.sin(b.phase));
+        const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+        g.addColorStop(0,    'rgba(' + ((120 + 80*p)|0) + ',0,0,' + (0.65*p).toFixed(2) + ')');
+        g.addColorStop(0.4,  'rgba(' + ((50  + 30*p)|0) + ',0,0,' + (0.35*p).toFixed(2) + ')');
         g.addColorStop(1,    'rgba(0,0,0,0)');
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, W, H);
       }
     }
 
-    // ── Image layer with wounds cut out ───────────────────────────────────
-    function drawImageLayer(t) {
+    // ── Image layer with wounds ───────────────────────────────────────────
+    function drawImageLayer() {
       if (!img.complete || !img.naturalWidth) return;
       if (!imgScale) {
         imgScale = Math.max(W / img.naturalWidth, H / img.naturalHeight);
@@ -86,49 +97,47 @@
       imgCtx.clearRect(0, 0, W, H);
       imgCtx.drawImage(img, imgX, imgY, imgW, imgH);
 
-      // Erase wound shapes
+      // Erase wound areas to reveal seething beneath
       imgCtx.globalCompositeOperation = 'destination-out';
-      for (const cut of cuts)
-        eraseWound(imgCtx, cut.points, cut.age / CUT_LIFE, t);
-      if (activeCut)
-        eraseWound(imgCtx, activeCut.points, 0, t);
+      for (const cut of cuts) eraseWound(cut.points, cut.age / CUT_LIFE);
+      if (activeCut)          eraseWound(activeCut.points, 0);
       imgCtx.globalCompositeOperation = 'source-over';
 
       ctx.drawImage(imgCvs, 0, 0);
     }
 
-    function eraseWound(c, pts, heal, t) {
+    function eraseWound(pts, heal) {
       const n = pts.length;
       if (n < 2) return;
-      c.lineCap = 'round'; c.lineJoin = 'round';
+      imgCtx.lineCap = 'round';
+      imgCtx.lineJoin = 'round';
+      imgCtx.strokeStyle = 'rgba(0,0,0,1)';
       for (let i = 1; i < n; i++) {
-        const taper  = Math.min(i / 5, 1, (n - i) / 5);
-        const wiggle = Math.sin(t * 0.04 + i * 1.3) * 0.7;
-        const w = Math.max(0, (3.5 + 3.5 * taper + wiggle) * (1 - heal * 0.9));
-        if (w < 0.2) continue;
-        c.lineWidth   = w;
-        c.strokeStyle = '#000';
-        c.beginPath();
-        c.moveTo(pts[i-1].x, pts[i-1].y);
-        c.lineTo(pts[i].x,   pts[i].y);
-        c.stroke();
+        const taper = Math.min(i / 4, 1, (n - i) / 4);
+        const w = Math.max(0, (5 + 5 * taper) * (1 - heal));
+        if (w < 0.3) continue;
+        imgCtx.lineWidth = w;
+        imgCtx.beginPath();
+        imgCtx.moveTo(pts[i-1].x, pts[i-1].y);
+        imgCtx.lineTo(pts[i].x,   pts[i].y);
+        imgCtx.stroke();
       }
     }
 
-    // ── Wound glow (dark red light from within) ───────────────────────────
-    function drawGlow(pts, alpha, t) {
+    // ── Wound glow ────────────────────────────────────────────────────────
+    function drawGlow(pts, alpha) {
       const n = pts.length;
       if (n < 2) return;
       ctx.save();
       ctx.globalCompositeOperation = 'screen';
       ctx.lineCap = 'round';
       for (let i = 1; i < n; i++) {
-        const taper = Math.min(i / 5, 1, (n - i) / 5);
-        const pulse = 0.6 + 0.4 * Math.sin(t * 0.07 + i * 0.5);
-        ctx.lineWidth   = 10 + 7 * taper;
-        ctx.strokeStyle = `rgba(150,0,0,${0.10 * alpha * pulse})`;
-        ctx.shadowBlur  = 18;
-        ctx.shadowColor = `rgba(200,0,0,${0.35 * alpha})`;
+        const taper = Math.min(i / 4, 1, (n - i) / 4);
+        const pulse = 0.55 + 0.45 * Math.sin(t * 0.07 + i * 0.6);
+        ctx.lineWidth   = 14 + 10 * taper;
+        ctx.strokeStyle = 'rgba(180,0,0,' + (0.18 * alpha * pulse).toFixed(3) + ')';
+        ctx.shadowBlur  = 22;
+        ctx.shadowColor = 'rgba(220,0,0,' + (0.5 * alpha).toFixed(3) + ')';
         ctx.beginPath();
         ctx.moveTo(pts[i-1].x, pts[i-1].y);
         ctx.lineTo(pts[i].x,   pts[i].y);
@@ -138,29 +147,29 @@
     }
 
     // ── Peeled edge strips ────────────────────────────────────────────────
-    function drawPeel(pts, alpha, t) {
+    function drawPeel(pts, alpha) {
       const n = pts.length;
       if (n < 2) return;
       ctx.save();
-      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       for (const side of [-1, 1]) {
         const path = [];
         for (let i = 0; i < n; i++) {
           const j  = Math.min(i, n - 2);
           const dx = pts[j+1].x - pts[j].x;
           const dy = pts[j+1].y - pts[j].y;
-          const L  = Math.hypot(dx, dy) || 1;
+          const L  = Math.sqrt(dx*dx + dy*dy) || 1;
           const nx = -dy / L, ny = dx / L;
-          const taper   = Math.min(i / 6, 1, (n - 1 - i) / 6);
-          const flutter = Math.sin(t * 0.05 + i * 0.85 + side * 1.5) * 2;
-          const off = side * (1.5 + 7 * taper + flutter);
+          const taper   = Math.min(i / 5, 1, (n - 1 - i) / 5);
+          const flutter = Math.sin(t * 0.05 + i * 0.9 + side * 1.4) * 2.5;
+          const off = side * (2 + 9 * taper + flutter);
           path.push({ x: pts[i].x + nx * off, y: pts[i].y + ny * off });
         }
-        ctx.lineWidth   = 2;
-        ctx.strokeStyle = `rgba(85,6,0,${0.75 * alpha})`;
-        ctx.shadowBlur  = 4;
-        ctx.shadowColor = 'rgba(160,0,0,0.3)';
+        ctx.lineWidth   = 2.5;
+        ctx.strokeStyle = 'rgba(100,8,0,' + (0.85 * alpha).toFixed(3) + ')';
+        ctx.shadowBlur  = 5;
+        ctx.shadowColor = 'rgba(200,0,0,0.4)';
         ctx.beginPath();
         ctx.moveTo(path[0].x, path[0].y);
         for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
@@ -169,120 +178,119 @@
       ctx.restore();
     }
 
-    // ── Flake particles (peeled surface debris) ───────────────────────────
-    class Flake {
-      constructor(x, y, nx, ny) {
-        const s  = Math.random() < 0.5 ? 1 : -1;
-        const sp = Math.random() * 1.1 + 0.25;
-        this.x  = x;        this.y  = y;
-        this.vx = nx*s*sp + (Math.random()-0.5)*0.35;
-        this.vy = ny*s*sp + (Math.random()-0.5)*0.35;
-        this.a  = Math.atan2(ny, nx);
-        this.av = (Math.random()-0.5)*0.06;
-        this.rx = Math.random()*9+3;
-        this.ry = Math.random()*1.6+0.4;
-        this.life  = 1;
-        this.decay = Math.random()*0.005+0.003;
-        const r = (35 + Math.random()*75)|0;
-        this.fill = `rgb(${r},${(r*0.05)|0},0)`;
-      }
-      step() {
-        this.vy += 0.012; this.vx *= 0.987; this.vy *= 0.987;
-        this.x += this.vx; this.y += this.vy;
-        this.a  += this.av; this.life -= this.decay;
-      }
-      draw() {
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, this.life) * 0.6;
-        ctx.translate(this.x, this.y); ctx.rotate(this.a);
-        ctx.fillStyle = this.fill;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, this.rx, this.ry, 0, 0, Math.PI*2);
-        ctx.fill();
-        ctx.restore();
-      }
-    }
-
+    // ── Flake particles ───────────────────────────────────────────────────
     const flakes = [];
+
+    function Flake(x, y, nx, ny) {
+      const s  = Math.random() < 0.5 ? 1 : -1;
+      const sp = Math.random() * 1.2 + 0.3;
+      this.x  = x;  this.y  = y;
+      this.vx = nx*s*sp + (Math.random()-0.5)*0.4;
+      this.vy = ny*s*sp + (Math.random()-0.5)*0.4;
+      this.a  = Math.atan2(ny, nx);
+      this.av = (Math.random()-0.5) * 0.07;
+      this.rx = Math.random()*9+3;
+      this.ry = Math.random()*1.8+0.4;
+      this.life  = 1;
+      this.decay = Math.random()*0.005+0.003;
+      const r = (40 + Math.random()*70)|0;
+      this.fill  = 'rgb(' + r + ',' + ((r*0.05)|0) + ',0)';
+    }
+    Flake.prototype.step = function() {
+      this.vy += 0.015; this.vx *= 0.988; this.vy *= 0.988;
+      this.x += this.vx; this.y += this.vy;
+      this.a  += this.av; this.life -= this.decay;
+    };
+    Flake.prototype.draw = function() {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, this.life) * 0.65;
+      ctx.translate(this.x, this.y); ctx.rotate(this.a);
+      ctx.fillStyle = this.fill;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, this.rx, this.ry, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    };
+
     function spawnFlakes(p0, p1) {
       const dx = p1.x - p0.x, dy = p1.y - p0.y;
-      const L = Math.hypot(dx, dy);
+      const L  = Math.sqrt(dx*dx + dy*dy);
       if (L < 1) return;
       const nx = -dy/L, ny = dx/L;
       const n  = Math.ceil(L / 10);
       for (let i = 0; i < n; i++) {
-        if (Math.random() < 0.35) {
+        if (Math.random() < 0.4) {
           const r = i / n;
           flakes.push(new Flake(p0.x+dx*r, p0.y+dy*r, nx, ny));
         }
       }
     }
 
-    // ── Cut state ─────────────────────────────────────────────────────────
+    // ── Cut management ────────────────────────────────────────────────────
     const cuts    = [];
-    let activeCut = null;
     const CUT_LIFE = 200;
     const MAX_CUTS = 5;
 
-    const getPos = e => e.touches
-      ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
-      : { x: e.clientX,            y: e.clientY };
+    function getPos(e) {
+      const src = e.touches ? e.touches[0] : e;
+      return { x: src.clientX, y: src.clientY };
+    }
 
-    let hintGone = false;
-
-    function onStart(e) {
-      e.preventDefault();
+    canvas.addEventListener('mousedown', function(e) {
       activeCut = { points: [getPos(e)], age: 0 };
       if (!hintGone) { hint.style.opacity = '0'; hintGone = true; }
-    }
-    function onMove(e) {
-      e.preventDefault();
+    });
+    canvas.addEventListener('mousemove', function(e) {
       if (!activeCut) return;
       const p = getPos(e), l = activeCut.points[activeCut.points.length - 1];
-      if ((p.x-l.x)**2 + (p.y-l.y)**2 > 20) {
-        spawnFlakes(l, p);
-        activeCut.points.push(p);
-      }
-    }
-    function onEnd() {
+      const dx = p.x-l.x, dy = p.y-l.y;
+      if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(p); }
+    });
+    canvas.addEventListener('mouseup', function() {
       if (activeCut && activeCut.points.length > 1) {
         if (cuts.length >= MAX_CUTS) cuts.shift();
         cuts.push(activeCut);
       }
       activeCut = null;
-    }
-
-    canvas.addEventListener('mousedown',  onStart);
-    canvas.addEventListener('mousemove',  onMove);
-    canvas.addEventListener('mouseup',    onEnd);
-    canvas.addEventListener('touchstart', onStart, { passive: false });
-    canvas.addEventListener('touchmove',  onMove,  { passive: false });
-    canvas.addEventListener('touchend',   onEnd);
+    });
+    canvas.addEventListener('touchstart', function(e) {
+      e.preventDefault();
+      activeCut = { points: [getPos(e)], age: 0 };
+      if (!hintGone) { hint.style.opacity = '0'; hintGone = true; }
+    }, { passive: false });
+    canvas.addEventListener('touchmove', function(e) {
+      e.preventDefault();
+      if (!activeCut) return;
+      const p = getPos(e), l = activeCut.points[activeCut.points.length - 1];
+      const dx = p.x-l.x, dy = p.y-l.y;
+      if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(p); }
+    }, { passive: false });
+    canvas.addEventListener('touchend', function() {
+      if (activeCut && activeCut.points.length > 1) {
+        if (cuts.length >= MAX_CUTS) cuts.shift();
+        cuts.push(activeCut);
+      }
+      activeCut = null;
+    });
 
     // ── Main loop ─────────────────────────────────────────────────────────
-    let t = 0;
-    (function loop() {
+    function loop() {
       t++;
-
       drawSeething();
-      drawImageLayer(t);
+      drawImageLayer();
 
-      for (const cut of cuts) {
-        const a = Math.max(0, 1 - cut.age / CUT_LIFE);
-        drawPeel(cut.points, a, t);
-        drawGlow(cut.points, a, t);
-        cut.age++;
+      for (let i = cuts.length - 1; i >= 0; i--) {
+        const a = Math.max(0, 1 - cuts[i].age / CUT_LIFE);
+        drawPeel(cuts[i].points, a);
+        drawGlow(cuts[i].points, a);
+        cuts[i].age++;
+        if (cuts[i].age >= CUT_LIFE) cuts.splice(i, 1);
       }
       if (activeCut) {
-        drawPeel(activeCut.points, 1, t);
-        drawGlow(activeCut.points, 1, t);
+        drawPeel(activeCut.points, 1);
+        drawGlow(activeCut.points, 1);
       }
 
-      // Remove healed cuts
-      for (let i = cuts.length - 1; i >= 0; i--)
-        if (cuts[i].age >= CUT_LIFE) cuts.splice(i, 1);
-
-      // Flakes
       for (let i = flakes.length - 1; i >= 0; i--) {
         flakes[i].step();
         flakes[i].draw();
@@ -290,8 +298,9 @@
       }
 
       requestAnimationFrame(loop);
-    })();
-  })();
+    }
+
+    loop();
   </script>
 </body>
 </html>
