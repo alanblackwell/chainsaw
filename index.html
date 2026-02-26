@@ -35,6 +35,9 @@
     let hintGone  = false;
     let t = 0;
 
+    const KERF  = 30;   // base chainsaw kerf width (px)
+    const TEETH = 10;   // jagged edge amplitude per side (px)
+
     function resize() {
       W = canvas.width  = imgCvs.width  = window.innerWidth;
       H = canvas.height = imgCvs.height = window.innerHeight;
@@ -106,22 +109,35 @@
       ctx.drawImage(imgCvs, 0, 0);
     }
 
+    // ── Chainsaw kerf erase (jagged polygon) ──────────────────────────────
     function eraseWound(pts, heal) {
       const n = pts.length;
       if (n < 2) return;
-      imgCtx.lineCap = 'round';
-      imgCtx.lineJoin = 'round';
-      imgCtx.strokeStyle = 'rgba(0,0,0,1)';
-      for (let i = 1; i < n; i++) {
-        const taper = Math.min(i / 4, 1, (n - i) / 4);
-        const w = Math.max(0, (5 + 5 * taper) * (1 - heal));
-        if (w < 0.3) continue;
-        imgCtx.lineWidth = w;
-        imgCtx.beginPath();
-        imgCtx.moveTo(pts[i-1].x, pts[i-1].y);
-        imgCtx.lineTo(pts[i].x,   pts[i].y);
-        imgCtx.stroke();
+      const scale = 1 - heal;
+      if (scale < 0.01) return;
+
+      // Build jagged polygon: forward along left (+normal) side, back along right
+      const left = [], right = [];
+      for (let i = 0; i < n; i++) {
+        const j  = Math.min(i, n - 2);
+        const dx = pts[j+1].x - pts[j].x;
+        const dy = pts[j+1].y - pts[j].y;
+        const L  = Math.sqrt(dx*dx + dy*dy) || 1;
+        const nx = -dy / L,  ny = dx / L;
+        const taper = Math.min(i / 3, 1, (n - 1 - i) / 3);
+        const lh = (KERF * 0.5 + (pts[i].nl || 0) * TEETH) * taper * scale;
+        const rh = (KERF * 0.5 + (pts[i].nr || 0) * TEETH) * taper * scale;
+        left.push({ x: pts[i].x + nx * lh, y: pts[i].y + ny * lh });
+        right.push({ x: pts[i].x - nx * rh, y: pts[i].y - ny * rh });
       }
+
+      imgCtx.fillStyle = 'rgba(0,0,0,1)';
+      imgCtx.beginPath();
+      imgCtx.moveTo(left[0].x, left[0].y);
+      for (let i = 1; i < n; i++) imgCtx.lineTo(left[i].x, left[i].y);
+      for (let i = n - 1; i >= 0; i--) imgCtx.lineTo(right[i].x, right[i].y);
+      imgCtx.closePath();
+      imgCtx.fill();
     }
 
     // ── Wound glow ────────────────────────────────────────────────────────
@@ -134,9 +150,9 @@
       for (let i = 1; i < n; i++) {
         const taper = Math.min(i / 4, 1, (n - i) / 4);
         const pulse = 0.55 + 0.45 * Math.sin(t * 0.07 + i * 0.6);
-        ctx.lineWidth   = 14 + 10 * taper;
+        ctx.lineWidth   = 20 + 16 * taper;
         ctx.strokeStyle = 'rgba(180,0,0,' + (0.18 * alpha * pulse).toFixed(3) + ')';
-        ctx.shadowBlur  = 22;
+        ctx.shadowBlur  = 28;
         ctx.shadowColor = 'rgba(220,0,0,' + (0.5 * alpha).toFixed(3) + ')';
         ctx.beginPath();
         ctx.moveTo(pts[i-1].x, pts[i-1].y);
@@ -146,64 +162,103 @@
       ctx.restore();
     }
 
-    // ── Peeled edge strips ────────────────────────────────────────────────
-    function drawPeel(pts, alpha) {
+    // ── Chainsaw jagged edges + embedded splinters ────────────────────────
+    function drawJaggedEdge(pts, alpha) {
       const n = pts.length;
       if (n < 2) return;
       ctx.save();
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      for (const side of [-1, 1]) {
-        const path = [];
+      ctx.lineCap  = 'butt';
+      ctx.lineJoin = 'miter';
+
+      for (const side of [1, -1]) {
+        const nk = side === 1 ? 'nl' : 'nr';   // which noise key to use
+
+        // Jagged edge line matching the erased polygon boundary
+        ctx.beginPath();
         for (let i = 0; i < n; i++) {
           const j  = Math.min(i, n - 2);
           const dx = pts[j+1].x - pts[j].x;
           const dy = pts[j+1].y - pts[j].y;
           const L  = Math.sqrt(dx*dx + dy*dy) || 1;
-          const nx = -dy / L, ny = dx / L;
-          const taper   = Math.min(i / 5, 1, (n - 1 - i) / 5);
-          const flutter = Math.sin(t * 0.05 + i * 0.9 + side * 1.4) * 2.5;
-          const off = side * (2 + 9 * taper + flutter);
-          path.push({ x: pts[i].x + nx * off, y: pts[i].y + ny * off });
+          const nx = -dy / L,  ny = dx / L;
+          const taper = Math.min(i / 3, 1, (n - 1 - i) / 3);
+          const half  = (KERF * 0.5 + (pts[i][nk] || 0) * TEETH) * taper;
+          const px = pts[i].x + nx * half * side;
+          const py = pts[i].y + ny * half * side;
+          if (i === 0) ctx.moveTo(px, py);
+          else         ctx.lineTo(px, py);
         }
-        ctx.lineWidth   = 2.5;
-        ctx.strokeStyle = 'rgba(100,8,0,' + (0.85 * alpha).toFixed(3) + ')';
+        ctx.lineWidth   = 1.8;
+        ctx.strokeStyle = 'rgba(65,4,0,' + (0.92 * alpha).toFixed(3) + ')';
         ctx.shadowBlur  = 5;
-        ctx.shadowColor = 'rgba(200,0,0,0.4)';
-        ctx.beginPath();
-        ctx.moveTo(path[0].x, path[0].y);
-        for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+        ctx.shadowColor = 'rgba(200,0,0,0.45)';
         ctx.stroke();
+
+        // Embedded splinter spikes radiating outward from the edge
+        ctx.lineWidth   = 1.2;
+        ctx.shadowBlur  = 2;
+        for (let i = 1; i < n - 1; i++) {
+          const pt = pts[i];
+          if (!pt.sl) continue;
+          const j  = Math.min(i, n - 2);
+          const dx = pts[j+1].x - pts[j].x;
+          const dy = pts[j+1].y - pts[j].y;
+          const L  = Math.sqrt(dx*dx + dy*dy) || 1;
+          const nx = -dy / L,  ny = dx / L;
+          const taper = Math.min(i / 3, 1, (n - 1 - i) / 3);
+          const half  = (KERF * 0.5 + (pt[nk] || 0) * TEETH) * taper;
+          // Base of spike sits on the edge
+          const bx = pt.x + nx * half * side;
+          const by = pt.y + ny * half * side;
+          // Spike extends outward along (normal * side) with angle jitter
+          const baseAng = Math.atan2(ny * side, nx * side) + (pt.sa || 0);
+          const ex = bx + Math.cos(baseAng) * pt.sl;
+          const ey = by + Math.sin(baseAng) * pt.sl;
+          ctx.strokeStyle = 'rgba(90,10,0,' + (0.72 * alpha).toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.moveTo(bx, by);
+          ctx.lineTo(ex, ey);
+          ctx.stroke();
+        }
       }
       ctx.restore();
     }
 
-    // ── Flake particles ───────────────────────────────────────────────────
+    // ── Debris particles ──────────────────────────────────────────────────
     const flakes = [];
 
     function Flake(x, y, nx, ny) {
-      const s  = Math.random() < 0.5 ? 1 : -1;
-      const sp = Math.random() * 1.2 + 0.3;
-      this.x  = x;  this.y  = y;
-      this.vx = nx*s*sp + (Math.random()-0.5)*0.4;
-      this.vy = ny*s*sp + (Math.random()-0.5)*0.4;
-      this.a  = Math.atan2(ny, nx);
-      this.av = (Math.random()-0.5) * 0.07;
-      this.rx = Math.random()*9+3;
-      this.ry = Math.random()*1.8+0.4;
+      const s   = Math.random() < 0.5 ? 1 : -1;
+      const sp  = Math.random() * 3 + 0.5;
+      // Wide spray angle — chainsaw throws debris broadly
+      const ang = Math.atan2(ny, nx) + (Math.random() - 0.5) * Math.PI * 0.75;
+      this.x  = x + (Math.random() - 0.5) * 10;
+      this.y  = y + (Math.random() - 0.5) * 10;
+      this.vx = Math.cos(ang) * s * sp;
+      this.vy = Math.sin(ang) * s * sp;
+      this.a  = Math.random() * Math.PI;
+      this.av = (Math.random() - 0.5) * 0.15;
+      // 40%: thin splinter, 60%: irregular chunk
+      if (Math.random() < 0.4) {
+        this.rx = Math.random() * 14 + 5;
+        this.ry = Math.random() * 1.2 + 0.3;
+      } else {
+        this.rx = Math.random() * 7 + 2;
+        this.ry = Math.random() * 5 + 1.5;
+      }
       this.life  = 1;
-      this.decay = Math.random()*0.005+0.003;
-      const r = (40 + Math.random()*70)|0;
-      this.fill  = 'rgb(' + r + ',' + ((r*0.05)|0) + ',0)';
+      this.decay = Math.random() * 0.007 + 0.003;
+      const r    = (45 + Math.random() * 80) | 0;
+      this.fill  = 'rgb(' + r + ',' + ((r * 0.04) | 0) + ',0)';
     }
     Flake.prototype.step = function() {
-      this.vy += 0.015; this.vx *= 0.988; this.vy *= 0.988;
+      this.vy += 0.02; this.vx *= 0.985; this.vy *= 0.985;
       this.x += this.vx; this.y += this.vy;
       this.a  += this.av; this.life -= this.decay;
     };
     Flake.prototype.draw = function() {
       ctx.save();
-      ctx.globalAlpha = Math.max(0, this.life) * 0.65;
+      ctx.globalAlpha = Math.max(0, this.life) * 0.72;
       ctx.translate(this.x, this.y); ctx.rotate(this.a);
       ctx.fillStyle = this.fill;
       ctx.beginPath();
@@ -217,11 +272,11 @@
       const L  = Math.sqrt(dx*dx + dy*dy);
       if (L < 1) return;
       const nx = -dy/L, ny = dx/L;
-      const n  = Math.ceil(L / 10);
+      const n  = Math.ceil(L / 6);   // denser than scalpel
       for (let i = 0; i < n; i++) {
-        if (Math.random() < 0.4) {
+        if (Math.random() < 0.65) {
           const r = i / n;
-          flakes.push(new Flake(p0.x+dx*r, p0.y+dy*r, nx, ny));
+          flakes.push(new Flake(p0.x + dx*r, p0.y + dy*r, nx, ny));
         }
       }
     }
@@ -231,20 +286,32 @@
     const CUT_LIFE = 200;
     const MAX_CUTS = 5;
 
+    // Each point carries stable per-point noise for the jagged edges & splinters
+    function makePoint(x, y) {
+      return {
+        x,  y,
+        nl: Math.random() * 2 - 1,                              // left edge noise
+        nr: Math.random() * 2 - 1,                              // right edge noise
+        sl: Math.random() < 0.28 ? (8 + Math.random() * 14) : 0, // splinter length
+        sa: (Math.random() - 0.5) * 0.8,                        // splinter angle jitter
+      };
+    }
+
     function getPos(e) {
       const src = e.touches ? e.touches[0] : e;
       return { x: src.clientX, y: src.clientY };
     }
 
     canvas.addEventListener('mousedown', function(e) {
-      activeCut = { points: [getPos(e)], age: 0 };
+      const p = getPos(e);
+      activeCut = { points: [makePoint(p.x, p.y)], age: 0 };
       if (!hintGone) { hint.style.opacity = '0'; hintGone = true; }
     });
     canvas.addEventListener('mousemove', function(e) {
       if (!activeCut) return;
       const p = getPos(e), l = activeCut.points[activeCut.points.length - 1];
       const dx = p.x-l.x, dy = p.y-l.y;
-      if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(p); }
+      if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(makePoint(p.x, p.y)); }
     });
     canvas.addEventListener('mouseup', function() {
       if (activeCut && activeCut.points.length > 1) {
@@ -255,7 +322,8 @@
     });
     canvas.addEventListener('touchstart', function(e) {
       e.preventDefault();
-      activeCut = { points: [getPos(e)], age: 0 };
+      const p = getPos(e);
+      activeCut = { points: [makePoint(p.x, p.y)], age: 0 };
       if (!hintGone) { hint.style.opacity = '0'; hintGone = true; }
     }, { passive: false });
     canvas.addEventListener('touchmove', function(e) {
@@ -263,7 +331,7 @@
       if (!activeCut) return;
       const p = getPos(e), l = activeCut.points[activeCut.points.length - 1];
       const dx = p.x-l.x, dy = p.y-l.y;
-      if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(p); }
+      if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(makePoint(p.x, p.y)); }
     }, { passive: false });
     canvas.addEventListener('touchend', function() {
       if (activeCut && activeCut.points.length > 1) {
@@ -281,13 +349,13 @@
 
       for (let i = cuts.length - 1; i >= 0; i--) {
         const a = Math.max(0, 1 - cuts[i].age / CUT_LIFE);
-        drawPeel(cuts[i].points, a);
+        drawJaggedEdge(cuts[i].points, a);
         drawGlow(cuts[i].points, a);
         cuts[i].age++;
         if (cuts[i].age >= CUT_LIFE) cuts.splice(i, 1);
       }
       if (activeCut) {
-        drawPeel(activeCut.points, 1);
+        drawJaggedEdge(activeCut.points, 1);
         drawGlow(activeCut.points, 1);
       }
 
