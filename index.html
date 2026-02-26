@@ -289,126 +289,78 @@
     // ── Chainsaw audio ────────────────────────────────────────────────────
     let audioCtx = null;
     let sawNodes = null;
+    let sawBuffer = null;
+    let sawRawBuf = null;
+
+    // Fetch the recording eagerly; decode once AudioContext exists
+    fetch('chainsaw.mp3')
+      .then(r => r.arrayBuffer())
+      .then(ab => { sawRawBuf = ab; if (audioCtx) decodeChainsaw(); })
+      .catch(() => {});
+
+    function decodeChainsaw() {
+      if (!sawRawBuf || sawBuffer) return;
+      const raw = sawRawBuf; sawRawBuf = null;
+      audioCtx.decodeAudioData(raw, buf => { sawBuffer = buf; });
+    }
 
     function initAudio() {
       if (!audioCtx) {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        decodeChainsaw();
       } else if (audioCtx.state === 'suspended') {
         audioCtx.resume();
       }
     }
 
-    function makeNoiseSrc(ac) {
-      const len = ac.sampleRate * 2;
-      const buf = ac.createBuffer(1, len, ac.sampleRate);
-      const d   = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-      const src = ac.createBufferSource();
-      src.buffer = buf;
-      src.loop   = true;
-      return src;
-    }
-
-    function makeDistCurve(amount) {
-      const n = 256, c = new Float32Array(n);
-      for (let i = 0; i < n; i++) {
-        const x = (i * 2) / (n - 1) - 1;
-        c[i] = Math.tanh(x * amount);
-      }
-      return c;
-    }
-
     function startSaw() {
-      if (!audioCtx || sawNodes) return;
+      if (!audioCtx || sawNodes || !sawBuffer) return;
       const ac  = audioCtx;
       const now = ac.currentTime;
 
       const master = ac.createGain();
       master.gain.setValueAtTime(0, now);
-      master.gain.linearRampToValueAtTime(0.3, now + 0.08);
+      master.gain.linearRampToValueAtTime(0.8, now + 0.08);
       master.connect(ac.destination);
 
-      // Engine 1: 65 Hz sawtooth → very heavy clip → lowpass 350 Hz
-      const eng1      = ac.createOscillator();
-      eng1.type             = 'sawtooth';
-      eng1.frequency.value  = 65;
-      const eng1Shape = ac.createWaveShaper();
-      eng1Shape.curve       = makeDistCurve(12);
-      eng1Shape.oversample  = '4x';
-      const eng1LP    = ac.createBiquadFilter();
-      eng1LP.type           = 'lowpass';
-      eng1LP.frequency.value = 350;
-      const eng1Gain  = ac.createGain();
-      eng1Gain.gain.value   = 0.6;
-      eng1.connect(eng1Shape); eng1Shape.connect(eng1LP); eng1LP.connect(eng1Gain); eng1Gain.connect(master);
+      // Random start offset (first half of file) + slight pitch variation
+      const offset = Math.random() * (sawBuffer.duration * 0.5);
+      const rate   = 0.92 + Math.random() * 0.16;   // 0.92–1.08×
+      const source = ac.createBufferSource();
+      source.buffer = sawBuffer;
+      source.loop   = true;
+      source.playbackRate.value = rate;
+      source.connect(master);
+      source.start(0, offset);
 
-      // Engine 2: slightly detuned copy for thickness and beating
-      const eng2      = ac.createOscillator();
-      eng2.type             = 'sawtooth';
-      eng2.frequency.value  = 65;
-      eng2.detune.value     = 14;
-      const eng2Shape = ac.createWaveShaper();
-      eng2Shape.curve       = makeDistCurve(12);
-      eng2Shape.oversample  = '4x';
-      const eng2LP    = ac.createBiquadFilter();
-      eng2LP.type           = 'lowpass';
-      eng2LP.frequency.value = 350;
-      const eng2Gain  = ac.createGain();
-      eng2Gain.gain.value   = 0.45;
-      eng2.connect(eng2Shape); eng2Shape.connect(eng2LP); eng2LP.connect(eng2Gain); eng2Gain.connect(master);
+      // Dungeon echo: two single-reflection slaps
+      const wetGain = ac.createGain(); wetGain.gain.value = 0.32;
+      wetGain.connect(ac.destination);
 
-      // LFO: slow pitch wobble on both engines (2 Hz, ±4 Hz)
-      const lfo  = ac.createOscillator();
-      lfo.frequency.value  = 2;
-      const lfoG = ac.createGain();
-      lfoG.gain.value      = 4;
-      lfo.connect(lfoG); lfoG.connect(eng1.frequency); lfoG.connect(eng2.frequency);
+      const d1t = 0.08 + Math.random() * 0.10;
+      const d2t = 0.18 + Math.random() * 0.12;
+      const delay1 = ac.createDelay(1.0); delay1.delayTime.value = d1t;
+      const del1G  = ac.createGain(); del1G.gain.value = 0.55;
+      master.connect(delay1); delay1.connect(del1G); del1G.connect(wetGain);
+      const delay2 = ac.createDelay(1.0); delay2.delayTime.value = d2t;
+      const del2G  = ac.createGain(); del2G.gain.value = 0.35;
+      master.connect(delay2); delay2.connect(del2G); del2G.connect(wetGain);
 
-      // Low rumble noise: white noise → lowpass 280 Hz only
-      const noise    = makeNoiseSrc(ac);
-      const noiseLP  = ac.createBiquadFilter();
-      noiseLP.type          = 'lowpass';
-      noiseLP.frequency.value = 280;
-      const noiseGain = ac.createGain();
-      noiseGain.gain.value  = 0.18;
-      noise.connect(noiseLP); noiseLP.connect(noiseGain); noiseGain.connect(master);
-
-      eng1.start(); eng2.start(); lfo.start(); noise.start();
-      sawNodes = { master, eng1, eng2, lfo, noise, coughTimer: null };
-
-      // Irregular engine coughs: brief pitch stumble + volume dip
-      function scheduleCough() {
-        sawNodes.coughTimer = setTimeout(() => {
-          if (!sawNodes) return;
-          const n = audioCtx.currentTime;
-          eng1.frequency.cancelScheduledValues(n);
-          eng2.frequency.cancelScheduledValues(n);
-          eng1.frequency.setValueAtTime(65, n);
-          eng1.frequency.linearRampToValueAtTime(40, n + 0.08);
-          eng1.frequency.linearRampToValueAtTime(65, n + 0.30);
-          eng2.frequency.setValueAtTime(65, n);
-          eng2.frequency.linearRampToValueAtTime(40, n + 0.08);
-          eng2.frequency.linearRampToValueAtTime(65, n + 0.30);
-          master.gain.cancelScheduledValues(n);
-          master.gain.setValueAtTime(0.3, n);
-          master.gain.linearRampToValueAtTime(0.08, n + 0.07);
-          master.gain.linearRampToValueAtTime(0.3, n + 0.30);
-          scheduleCough();
-        }, 1800 + Math.random() * 2800);
-      }
-      scheduleCough();
+      sawNodes = { master, source, wetGain, delay1, delay2, del1G, del2G };
     }
 
     function stopSaw() {
       if (!sawNodes) return;
-      const { master, eng1, eng2, lfo, noise, coughTimer } = sawNodes;
-      clearTimeout(coughTimer);
+      const { master, source, wetGain, delay1, delay2, del1G, del2G } = sawNodes;
       const now = audioCtx.currentTime;
+      master.gain.cancelScheduledValues(now);
       master.gain.setValueAtTime(master.gain.value, now);
-      master.gain.linearRampToValueAtTime(0, now + 0.12);
+      master.gain.linearRampToValueAtTime(0, now + 2.5);
       setTimeout(() => {
-        try { eng1.stop(); eng2.stop(); lfo.stop(); noise.stop(); master.disconnect(); } catch(e) {}
-      }, 200);
+        try { source.stop(); master.disconnect();
+              delay1.disconnect(); delay2.disconnect();
+              del1G.disconnect(); del2G.disconnect(); wetGain.disconnect(); } catch(e) {}
+      }, 7000);
       sawNodes = null;
     }
 
