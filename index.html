@@ -28,20 +28,38 @@
     const imgCvs = document.createElement('canvas');
     const imgCtx = imgCvs.getContext('2d');
 
+    // Offscreen canvas: robot.png composited with reveal mask
+    const robotCvs = document.createElement('canvas');
+    const robotCtx = robotCvs.getContext('2d');
+
+    // Persistent reveal mask — accumulates as cuts are made, never cleared
+    const revealCvs = document.createElement('canvas');
+    const revealCtx = revealCvs.getContext('2d');
+
     // Declare all shared variables upfront (no TDZ hazards)
     let W, H;
     let imgScale = 0, imgW, imgH, imgX, imgY;
+    let robotScale = 0, robotW, robotH, robotX, robotY;
     let activeCut = null;
     let hintGone  = false;
     let t = 0;
+
+    // Triple-tap flash state
+    let flashPhase  = null;  // null | 'hold' | 'fade'
+    let flashTimer  = 0;
+    const FLASH_HOLD = 120;  // frames at full reveal (~2 s at 60 fps)
+    const FLASH_FADE = 90;   // frames to fade back  (~1.5 s)
+    let pointerDownTime = 0;
+    const tapTimes = [];
 
     const KERF  = 30;   // base chainsaw kerf width (px)
     const TEETH = 10;   // jagged edge amplitude per side (px)
 
     function resize() {
-      W = canvas.width  = imgCvs.width  = window.innerWidth;
-      H = canvas.height = imgCvs.height = window.innerHeight;
+      W = canvas.width  = imgCvs.width  = robotCvs.width  = revealCvs.width  = window.innerWidth;
+      H = canvas.height = imgCvs.height = robotCvs.height = revealCvs.height = window.innerHeight;
       imgScale = 0;
+      robotScale = 0;
     }
     resize();
     window.addEventListener('resize', resize);
@@ -49,6 +67,10 @@
     // Photo
     const img = new Image();
     img.src = 'source.png';
+
+    // Hidden image revealed by cuts
+    const robotImg = new Image();
+    robotImg.src = 'robot.png';
 
     // ── Seething background ───────────────────────────────────────────────
     const blobs = [];
@@ -106,7 +128,66 @@
       if (activeCut)          eraseWound(activeCut.points, 0);
       imgCtx.globalCompositeOperation = 'source-over';
 
+      const fp = flashProgress();
+      if (fp > 0) ctx.globalAlpha = 1 - fp;
       ctx.drawImage(imgCvs, 0, 0);
+      if (fp > 0) ctx.globalAlpha = 1;
+    }
+
+    // ── Reveal mask accumulation ──────────────────────────────────────────
+    // Stamps the cut polygon into revealCvs with low alpha each frame,
+    // so robot.png gradually becomes visible where cuts have been made.
+    function accumulateReveal(pts) {
+      const n = pts.length;
+      if (n < 2) return;
+      const left = [], right = [];
+      for (let i = 0; i < n; i++) {
+        const j  = Math.min(i, n - 2);
+        const dx = pts[j+1].x - pts[j].x;
+        const dy = pts[j+1].y - pts[j].y;
+        const L  = Math.sqrt(dx*dx + dy*dy) || 1;
+        const nx = -dy / L,  ny = dx / L;
+        const taper = Math.min(i / 3, 1, (n - 1 - i) / 3);
+        const lh = (KERF * 0.5 + (pts[i].nl || 0) * TEETH) * taper;
+        const rh = (KERF * 0.5 + (pts[i].nr || 0) * TEETH) * taper;
+        left.push({ x: pts[i].x + nx * lh, y: pts[i].y + ny * lh });
+        right.push({ x: pts[i].x - nx * rh, y: pts[i].y - ny * rh });
+      }
+      revealCtx.globalAlpha = 0.04;
+      revealCtx.fillStyle = '#fff';
+      revealCtx.beginPath();
+      revealCtx.moveTo(left[0].x, left[0].y);
+      for (let i = 1; i < n; i++) revealCtx.lineTo(left[i].x, left[i].y);
+      for (let i = n - 1; i >= 0; i--) revealCtx.lineTo(right[i].x, right[i].y);
+      revealCtx.closePath();
+      revealCtx.fill();
+      revealCtx.globalAlpha = 1;
+    }
+
+    // ── Robot image layer ─────────────────────────────────────────────────
+    // Draws robot.png masked to only the accumulated reveal regions.
+    function drawRobotLayer() {
+      if (!robotImg.complete || !robotImg.naturalWidth) return;
+      if (!robotScale) {
+        robotScale = Math.max(W / robotImg.naturalWidth, H / robotImg.naturalHeight);
+        robotW = robotImg.naturalWidth  * robotScale;
+        robotH = robotImg.naturalHeight * robotScale;
+        robotX = (W - robotW) / 2;
+        robotY = (H - robotH) / 2;
+      }
+      robotCtx.clearRect(0, 0, W, H);
+      robotCtx.drawImage(robotImg, robotX, robotY, robotW, robotH);
+      robotCtx.globalCompositeOperation = 'destination-in';
+      robotCtx.drawImage(revealCvs, 0, 0);
+      robotCtx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(robotCvs, 0, 0);
+      // During flash: draw the full unmasked robot on top of the masked layer
+      const fp = flashProgress();
+      if (fp > 0) {
+        ctx.globalAlpha = fp;
+        ctx.drawImage(robotImg, robotX, robotY, robotW, robotH);
+        ctx.globalAlpha = 1;
+      }
     }
 
     // ── Chainsaw kerf erase (jagged polygon) ──────────────────────────────
@@ -386,6 +467,7 @@
     }
 
     canvas.addEventListener('mousedown', function(e) {
+      pointerDownTime = Date.now();
       initAudio();
       const p = getPos(e);
       activeCut = { points: [makePoint(p.x, p.y)], age: 0 };
@@ -399,6 +481,10 @@
       if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(makePoint(p.x, p.y)); }
     });
     canvas.addEventListener('mouseup', function() {
+      // Count as a tap if press was short and the pointer barely moved
+      if (Date.now() - pointerDownTime < 300 && activeCut && activeCut.points.length <= 3) {
+        recordTap();
+      }
       if (activeCut && activeCut.points.length > 1) {
         if (cuts.length >= MAX_CUTS) cuts.shift();
         cuts.push(activeCut);
@@ -408,6 +494,7 @@
     });
     canvas.addEventListener('touchstart', function(e) {
       e.preventDefault();
+      pointerDownTime = Date.now();
       initAudio();
       const p = getPos(e);
       activeCut = { points: [makePoint(p.x, p.y)], age: 0 };
@@ -422,6 +509,10 @@
       if (dx*dx + dy*dy > 16) { spawnFlakes(l, p); activeCut.points.push(makePoint(p.x, p.y)); }
     }, { passive: false });
     canvas.addEventListener('touchend', function() {
+      // Count as a tap if press was short and the pointer barely moved
+      if (Date.now() - pointerDownTime < 300 && activeCut && activeCut.points.length <= 3) {
+        recordTap();
+      }
       if (activeCut && activeCut.points.length > 1) {
         if (cuts.length >= MAX_CUTS) cuts.shift();
         cuts.push(activeCut);
@@ -430,10 +521,39 @@
       stopSaw();
     });
 
+    // ── Triple-tap flash ──────────────────────────────────────────────────
+    function triggerFlash() {
+      flashPhase = 'hold';
+      flashTimer = 0;
+    }
+    function tickFlash() {
+      if (!flashPhase) return;
+      flashTimer++;
+      if (flashPhase === 'hold' && flashTimer >= FLASH_HOLD) { flashPhase = 'fade'; flashTimer = 0; }
+      else if (flashPhase === 'fade' && flashTimer >= FLASH_FADE) { flashPhase = null; }
+    }
+    function flashProgress() {
+      if (!flashPhase) return 0;
+      if (flashPhase === 'hold') return 1;
+      return 1 - flashTimer / FLASH_FADE;  // 1 → 0 over the fade
+    }
+    function recordTap() {
+      const now = Date.now();
+      tapTimes.push(now);
+      while (tapTimes.length > 3) tapTimes.shift();
+      if (tapTimes.length === 3 && now - tapTimes[0] < 800) {
+        triggerFlash();
+        tapTimes.length = 0;
+      }
+    }
+
     // ── Main loop ─────────────────────────────────────────────────────────
     function loop() {
       t++;
+      tickFlash();
       drawSeething();
+      if (activeCut && activeCut.points.length >= 2) accumulateReveal(activeCut.points);
+      drawRobotLayer();
       drawImageLayer();
 
       for (let i = cuts.length - 1; i >= 0; i--) {
